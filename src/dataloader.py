@@ -21,7 +21,14 @@ class TrainSliceExtractor(Dataset):
     """Extract slices from 3D volumes and return them as 2D images with metadata."""
 
     def __init__(
-        self, fnames, labels_dir, scan_info_path, resample_input_volumes, resize_input_images, balance_classes=False
+        self, 
+        fnames, 
+        labels_dir, 
+        scan_info_path, 
+        resample_input_volumes, 
+        resize_input_images, 
+        balance_classes=False,
+        standard_resolution=[1.5, 0.66, 0.66]
     ):
         super().__init__()
         self.labels_dir = labels_dir
@@ -60,6 +67,7 @@ class TrainSliceExtractor(Dataset):
         self.examples = examples
         self.slice_indices = slice_indices
         self.balance_classes = balance_classes
+        self.standard_resolution = standard_resolution
         self.rs = np.random.RandomState(42)
 
     def resampleThroughPlane(self, image, spacing, origin, original_slice_thickness):
@@ -87,7 +95,7 @@ class TrainSliceExtractor(Dataset):
         spacingNew = np.array([1.5, spacing[1], spacing[2]])
         return imageRes, spacingNew, originRes
 
-    def resampleInPlane(self, image, spacing, resolution=None, maskBool=False, standard_resolution=[1.5, 0.66, 0.66]):
+    def resampleInPlane(self, image, spacing, resolution=None, maskBool=False):
         """
         Resample the image in-plane to the specified resolution.
 
@@ -99,13 +107,11 @@ class TrainSliceExtractor(Dataset):
         :type resolution: tuple
         :param maskBool: Whether to resample a mask.
         :type maskBool: bool
-        :param standard_resolution: The standard resolution.
-        :type standard_resolution: list
         :return: The resampled image and resolution.
         :rtype: tuple
         """
         if resolution is None:
-            resolution = standard_resolution
+            resolution = self.standard_resolution
         resampling_factors = tuple(o / n for o, n in zip(spacing, resolution))
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
@@ -122,8 +128,8 @@ class TrainSliceExtractor(Dataset):
         :rtype: tuple
         """
         img = sitk.ReadImage(fname)
-        origin = tuple(reversed(list(img.GetOrigin())))
-        spacing = tuple(reversed(list(img.GetSpacing())))
+        default_origin = tuple(reversed(list(img.GetOrigin())))
+        default_spacing = tuple(reversed(list(img.GetSpacing())))
 
         # Open the scan info file and find the voxel size for the current scan
         with open(self.scan_info_path, 'r') as f:
@@ -139,12 +145,22 @@ class TrainSliceExtractor(Dataset):
 
         if self.resample_input_volumes:
             # Thick-slice through-plane resampling to 3.0 mm slice thickness and 1.5 mm spacing
-            ts_image, ts_spacing, ts_origin = self.resampleThroughPlane(img, spacing, origin, voxel_size)
+            ts_image, ts_spacing, ts_origin = self.resampleThroughPlane(
+                img, default_spacing, default_origin, voxel_size
+            )
             img, spacing = self.resampleInPlane(ts_image, ts_spacing)
 
             # Thick-slice through-plane resampling to 3.0 mm slice thickness and 1.5 mm spacing for labels
-            ts_labels, ts_labels_spacing, _ = self.resampleThroughPlane(labels_bboxes, spacing, origin, voxel_size)
+            ts_labels, ts_labels_spacing, _ = self.resampleThroughPlane(
+                labels_bboxes, default_spacing, default_origin, voxel_size
+            )
             labels_bboxes, _ = self.resampleInPlane(ts_labels, ts_labels_spacing)
+        else:
+            print("Resampling of input images has been set to False. Please make sure your scans are properly"
+                  "preprocessed. You can also enable automatic resampling, by using the --resample_input_volumes"
+                  "flag.")
+            spacing = default_spacing
+            assert spacing == self.standard_resolution
 
         # Normalize image values since some vendors use values < -1024 outside the FOV of the scan
         img = np.clip(img, -1000, 3096)
